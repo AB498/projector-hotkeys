@@ -1,4 +1,4 @@
--- Add hotkeys to open fullscreen projectors
+-- Add hotkeys to open projectors
 -- David Magnus <davidkmagnus@gmail.com>
 -- https://github.com/DavidKMagnus
 
@@ -7,7 +7,11 @@ PROJECTOR_TYPE_SOURCE = "Source"
 PROJECTOR_TYPE_PROGRAM = "StudioProgram"
 PROJECTOR_TYPE_MULTIVIEW = "Multiview"
 
-DEFAULT_MONITOR = 1
+-- Use -1 for windowed, or positive numbers for fullscreen on specific monitors
+DEFAULT_MONITOR = -1
+
+-- Mode setting keys
+WINDOWED_MODE = "windowed_mode"
 
 PROGRAM = "Program Output"
 MULTIVIEW = "Multiview Output"
@@ -19,13 +23,15 @@ monitors = {}
 startup_projectors = {}
 double_startup = {}
 hotkey_ids = {}
+use_windowed_mode = true  -- Default to windowed mode
 
 function script_description()
     local description = [[
-        <center><h2>Fullscreen Projector Hotkeys</h2></center>
+        <center><h2>Projector Hotkeys</h2></center>
         <p>Hotkeys will be added for the Program output, Multiview, and each currently existing scene.
-        Choose the monitor to which each output will be projected when the hotkey is pressed.</p>
-        <p>You can also choose to open a projector to a specific monitor on startup. If you use
+        Choose how each output will be displayed when the hotkey is pressed.</p>
+        <p>You can switch between windowed and fullscreen modes, and select which monitor to use for fullscreen mode.</p>
+        <p>You can also choose to open a projector on startup. If you use
         this option, you may need to disable the "Save projectors on exit" preference or there
         will be duplicate projectors.</p>
         <p>Some OBS users report that projectors opened on startup can be blank grey screens.
@@ -41,17 +47,20 @@ end
 function script_properties()
     local p = obslua.obs_properties_create()
 
+    -- Add global option to switch between windowed and fullscreen mode
+    obslua.obs_properties_add_bool(p, WINDOWED_MODE, "Use Windowed Mode (uncheck for fullscreen)")
+
     -- set up the controls for the Program Output
     local gp = obslua.obs_properties_create()
     obslua.obs_properties_add_group(p, PROGRAM .. GROUP, "Program Output", obslua.OBS_GROUP_NORMAL, gp)
-    obslua.obs_properties_add_int(gp, PROGRAM, "Project to monitor:", 1, 10, 1)
+    obslua.obs_properties_add_int(gp, PROGRAM, "Monitor (used for fullscreen mode):", 1, 10, 1)
     obslua.obs_properties_add_bool(gp, PROGRAM .. STARTUP, "Open on Startup")
     obslua.obs_properties_add_bool(gp, PROGRAM .. DOUBLE, "Open Again on Startup")
 
     -- set up the controls for the Multiview
     local gp = obslua.obs_properties_create()
     obslua.obs_properties_add_group(p, MULTIVIEW .. GROUP, "Multiview", obslua.OBS_GROUP_NORMAL, gp)
-    obslua.obs_properties_add_int(gp, MULTIVIEW, "Project to monitor:", 1, 10, 1)
+    obslua.obs_properties_add_int(gp, MULTIVIEW, "Monitor (used for fullscreen mode):", 1, 10, 1)
     obslua.obs_properties_add_bool(gp, MULTIVIEW .. STARTUP, "Open on Startup")
     obslua.obs_properties_add_bool(gp, MULTIVIEW .. DOUBLE, "Open Again on Startup")
 
@@ -61,7 +70,7 @@ function script_properties()
         for _, scene in ipairs(scenes) do
             local gp = obslua.obs_properties_create()
             obslua.obs_properties_add_group(p, scene .. GROUP, scene, obslua.OBS_GROUP_NORMAL, gp)
-            obslua.obs_properties_add_int(gp, scene, "Project to monitor:", 1, 10, 1)
+            obslua.obs_properties_add_int(gp, scene, "Monitor (used for fullscreen mode):", 1, 10, 1)
             obslua.obs_properties_add_bool(gp, scene .. STARTUP, "Open on Startup")
             obslua.obs_properties_add_bool(gp, scene .. DOUBLE, "Open Again on Startup")
         end
@@ -72,10 +81,20 @@ function script_properties()
 end
 
 function script_update(settings)
+    -- Get the windowed mode setting
+    use_windowed_mode = obslua.obs_data_get_bool(settings, WINDOWED_MODE)
     update_monitor_preferences(settings)
 end
 
+function script_defaults(settings)
+    -- Set default value for windowed mode
+    obslua.obs_data_set_default_bool(settings, WINDOWED_MODE, true)
+end
+
 function script_load(settings)   
+    -- Load the windowed mode setting
+    use_windowed_mode = obslua.obs_data_get_bool(settings, WINDOWED_MODE)
+    
     local scenes = obslua.obs_frontend_get_scene_names()
     if scenes == nil or #scenes == 0 then
         -- on obs startup, scripts are loaded before scenes are finished loading
@@ -112,13 +131,14 @@ function update_monitor_preferences(settings)
     table.insert(outputs, PROGRAM)
 
     for _, output in ipairs(outputs) do
+        -- Get the monitor preference for this output
         local monitor = obslua.obs_data_get_int(settings, output)
         if monitor == nil or monitor == 0 then
-            monitor = DEFAULT_MONITOR
+            monitor = 1  -- Default to monitor 1 for fullscreen
         end
-
-        -- monitors are 0 indexed here, but 1-indexed in the OBS menus
-        monitors[output] = monitor-1
+        
+        -- monitors are 0 indexed in the API, but 1-indexed in the OBS UI
+        monitors[output] = monitor - 1
 
         -- set which projectors should open on start up
         startup_projectors[output] = obslua.obs_data_get_bool(settings, output .. STARTUP)
@@ -138,12 +158,12 @@ function register_hotkeys(settings)
     for _, output in ipairs(outputs) do
         hotkey_ids[output] = obslua.obs_hotkey_register_frontend(
             output_to_function_name(output),
-            "Open Fullscreen Projector for '" .. output .. "'",
+            "Open Projector for '" .. output .. "'",
             function(pressed)
                 if not pressed then
                     return
                 end
-                open_fullscreen_projector(output)
+                open_projector(output)
             end
         )
 
@@ -154,13 +174,8 @@ function register_hotkeys(settings)
     obslua.bfree(output)
 end
 
--- open a full screen projector
-function open_fullscreen_projector(output)
-     -- set the default monitor if one was never set
-    if monitors[output] == nil then
-        monitors[output] = DEFAULT_MONITOR
-    end
-
+-- open a projector
+function open_projector(output)
     -- set the projector type if this is not a normal scene
     local projector_type = PROJECTOR_TYPE_SCENE
     if output == PROGRAM then
@@ -169,21 +184,28 @@ function open_fullscreen_projector(output)
         projector_type = PROJECTOR_TYPE_MULTIVIEW
     end
 
+    -- Determine monitor based on windowed mode setting
+    local monitor_value = monitors[output]
+    if use_windowed_mode then
+        monitor_value = -1  -- -1 forces windowed mode
+    end
+
     -- call the front end API to open the projector
-    obslua.obs_frontend_open_projector(projector_type, monitors[output], "", output)
+    -- when monitor is -1, it opens a windowed projector instead of fullscreen
+    obslua.obs_frontend_open_projector(projector_type, monitor_value, "", output)
 end
 
 -- open startup projectors
 function open_startup_projectors()
     for output, open_on_startup in pairs(startup_projectors) do
         if open_on_startup then
-            open_fullscreen_projector(output)
+            open_projector(output)
         end
     end
     -- check again for any that should be opened twice
     for output, open_twice in pairs(double_startup) do
         if open_twice then
-            open_fullscreen_projector(output)
+            open_projector(output)
         end
     end
 end
